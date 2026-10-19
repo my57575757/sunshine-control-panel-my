@@ -13,6 +13,7 @@ use crate::github_download::{
 
 mod channel;
 mod preferences;
+pub(crate) mod source;
 
 use channel::ReleaseChannel;
 
@@ -50,6 +51,17 @@ pub struct UpdateInfo {
     /// `true` = 已是最新（只读浏览），`false`（默认）= 有可用更新
     #[serde(default)]
     pub is_latest: bool,
+    /// 更新来源：默认（release，线上安装包）或 source_build（fork 同步后本地构建）
+    #[serde(default)]
+    pub kind: String,
+    /// source_build 模式下本地 my_dev 落后/领先上游 master 的提交数
+    #[serde(default)]
+    pub behind_count: Option<u32>,
+    #[serde(default)]
+    pub ahead_count: Option<u32>,
+    /// source_build 模式使用的本地源码目录
+    #[serde(default)]
+    pub source_dir: Option<String>,
 }
 
 /// GitHub Release 数据结构
@@ -125,6 +137,9 @@ struct UpdaterHelperState {
     gui_exe_path: String,
     result_path: String,
     parent_pid: u32,
+    /// exe 安装包的静默参数体系：缺省/`inno` 用 Inno Setup 参数，`nsis` 用 /S。
+    #[serde(default)]
+    installer_kind: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -350,6 +365,10 @@ fn create_update_info(release: &GitHubRelease) -> UpdateInfo {
         download_size,
         release_page: release.html_url.clone(),
         is_latest: false,
+        kind: String::new(),
+        behind_count: None,
+        ahead_count: None,
+        source_dir: None,
     }
 }
 
@@ -374,6 +393,16 @@ async fn check_for_updates_in_channel(
     channel: ReleaseChannel,
 ) -> Result<Option<UpdateInfo>, String> {
     info!("🔍 开始检查更新... (通道: {})", channel.description());
+
+    // 配置了有效本地源码树时，改为按上游提交差检查并走“同步+本地构建”流程；
+    // 发布通道（稳定/预发布）在该模式下无区分意义，统一返回源码更新信息。
+    if let Some(source_dir) = source::effective_source_dir() {
+        info!(
+            "📂 已配置本地 Sunshine 源码目录，按上游提交差检查更新: {}",
+            source_dir.display()
+        );
+        return source::check_source_update(source_dir, manual).await;
+    }
 
     // 获取当前 Sunshine 版本
     let current_version = match get_current_sunshine_version().await {
@@ -1329,10 +1358,17 @@ fn run_installer_and_wait(state: &UpdaterHelperState) -> Result<i32, String> {
             .args(["/i", &state.installer_path, "/qn", "/norestart"])
             .creation_flags(CREATE_NO_WINDOW)
             .status(),
-        "exe" => Command::new(&state.installer_path)
-            .args(["/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-"])
-            .creation_flags(CREATE_NO_WINDOW)
-            .status(),
+        "exe" => {
+            let silent_args: &[&str] = match state.installer_kind.as_deref() {
+                Some("nsis") => &["/S"],
+                // 线上 Release 的 exe 安装包是 Inno Setup；缺省也按 Inno 处理。
+                _ => &["/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-"],
+            };
+            Command::new(&state.installer_path)
+                .args(silent_args)
+                .creation_flags(CREATE_NO_WINDOW)
+                .status()
+        }
         other => return Err(format!("Unsupported installer extension: {}", other)),
     }
     .map_err(|e| format!("start installer failed: {}", e))?;
@@ -2098,6 +2134,7 @@ fn prepare_updater_helper(
     file_path: &str,
     extension: &str,
     target_version: Option<String>,
+    installer_kind: Option<String>,
 ) -> Result<(PathBuf, PathBuf), String> {
     let current_exe =
         std::env::current_exe().map_err(|e| format!("get current exe failed: {}", e))?;
@@ -2116,6 +2153,7 @@ fn prepare_updater_helper(
         gui_exe_path: current_exe.to_string_lossy().to_string(),
         result_path: result_path.to_string_lossy().to_string(),
         parent_pid: std::process::id(),
+        installer_kind,
     };
 
     let state_content = serde_json::to_string_pretty(&state)
@@ -2171,6 +2209,7 @@ fn launch_updater_helper_elevated(helper_exe: &Path, state_path: &Path) -> Resul
 pub async fn install_update(
     file_path: String,
     target_version: Option<String>,
+    installer_kind: Option<String>,
     app_handle: AppHandle,
 ) -> Result<(), String> {
     #[cfg(target_os = "windows")]
@@ -2194,8 +2233,14 @@ pub async fn install_update(
         }
 
         emit_install_progress(&app_handle, "building-command", None, false);
+        // 前端入参只认 nsis，其它值（含 null）一律按 Inno 缺省处理。
+        let normalized_kind = match installer_kind.as_deref() {
+            Some("nsis") => Some("nsis".to_string()),
+            _ => None,
+        };
         let (helper_exe, state_path) =
-            match prepare_updater_helper(&file_path, &extension, target_version) {
+            match prepare_updater_helper(&file_path, &extension, target_version, normalized_kind)
+            {
                 Ok(paths) => paths,
                 Err(e) => {
                     emit_install_progress(&app_handle, "failed", Some(&e), true);

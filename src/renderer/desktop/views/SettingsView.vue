@@ -27,6 +27,8 @@
 
     <SettingsFileSharingCard />
 
+    <SettingsSourceDirCard :has-tauri="hasTauri" />
+
     <SettingsToggleSection
       :title="t.settings.notifications"
       :icon="Bell"
@@ -69,6 +71,7 @@ import SettingsFileSharingCard from '../components/settings/SettingsFileSharingC
 import SettingsLaunchAssistantCard from '../components/settings/SettingsLaunchAssistantCard.vue'
 import SettingsNotice from '../components/settings/SettingsNotice.vue'
 import SettingsPetCard from '../components/settings/SettingsPetCard.vue'
+import SettingsSourceDirCard from '../components/settings/SettingsSourceDirCard.vue'
 import SettingsToggleSection from '../components/settings/SettingsToggleSection.vue'
 
 const { t } = useI18n()

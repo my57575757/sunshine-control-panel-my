@@ -4,8 +4,8 @@
     :title="dialogTitle"
     width="min(720px, 92vw)"
     :close-on-click-modal="isLatest"
-    :close-on-press-escape="isLatest || (!isInstalling && !isDownloading)"
-    :show-close="!isInstalling && !isDownloading"
+    :close-on-press-escape="isLatest || (!isInstalling && !isDownloading && !isSourceRunning)"
+    :show-close="!isInstalling && !isDownloading && !isSourceRunning"
   >
     <div class="update-dialog-content">
 
@@ -14,8 +14,31 @@
         <div class="notes-content" v-html="parsedReleaseNotes"></div>
       </div>
 
-      <!-- 下载进度 (仅新版本) -->
-      <div v-if="!isLatest && isDownloading" class="download-progress">
+      <!-- 源码模式：同步 + 本地构建进度 -->
+      <div v-if="isSourceBuild && !isLatest && (isSourceRunning || sourceLogLines.length)" class="source-progress">
+        <div class="download-status">
+          <span v-if="isSourceRunning && !sourceError" class="download-spinner"></span>
+          <span v-else-if="!sourceError" class="download-complete-mark">✓</span>
+          <p class="progress-text">{{ sourceStatusText }}</p>
+        </div>
+
+        <ol class="install-steps">
+          <li
+            v-for="(step, index) in sourceSteps"
+            :key="step.key"
+            :class="getSourceStepStatus(index)"
+          >
+            <span class="step-dot"></span>
+            <span class="step-label">{{ step.label }}</span>
+          </li>
+        </ol>
+
+        <pre v-if="sourceLogTail" class="source-log">{{ sourceLogTail }}</pre>
+        <p v-if="sourceError" class="source-error">{{ sourceError }}</p>
+      </div>
+
+      <!-- 下载进度 (仅新版本、线上安装包模式) -->
+      <div v-if="!isLatest && !isSourceBuild && isDownloading" class="download-progress">
         <div class="download-status">
           <span v-if="downloadPhase !== 'complete'" class="download-spinner"></span>
           <span v-else class="download-complete-mark">✓</span>
@@ -36,9 +59,9 @@
         />
       </div>
 
-      <!-- 安装包已就绪 (下载完成或上次已下载) -->
+      <!-- 安装包已就绪 (下载完成/本地构建完成/上次已下载) -->
       <div v-if="!isLatest && installReady" class="install-ready-panel">
-        <p class="install-note">{{ t.updateDialog.installReadyHint }}</p>
+        <p class="install-note">{{ isSourceBuild ? t.updateDialog.sourceInstallReadyHint : t.updateDialog.installReadyHint }}</p>
       </div>
 
       <!-- 安装提示 (仅新版本) -->
@@ -74,17 +97,46 @@
           <el-button type="primary" @click="handleCancel">{{ t.updateDialog.close }}</el-button>
         </template>
         <template v-else>
-          <template v-if="showDownloadButtons">
-            <el-button @click="handleOpenBrowser">{{ t.updateDialog.openInBrowser }}</el-button>
-            <el-button @click="handleSkipVersion">{{ t.updateDialog.skipVersion }}</el-button>
-            <el-button @click="handleCancel">{{ t.updateDialog.remindLater }}</el-button>
-            <el-button type="primary" :loading="isDownloading" @click="handleDownload">
-              <el-icon><Download /></el-icon>
-              {{ t.updateDialog.downloadAndInstall }}
-            </el-button>
-          </template>
+          <el-button @click="handleOpenBrowser">{{ t.updateDialog.openInBrowser }}</el-button>
+
           <el-button
-            v-if="isDownloading"
+            v-if="isSourceBuild && !installReady && !isSourceRunning && !isInstalling"
+            @click="handleCancel"
+          >{{ t.updateDialog.remindLater }}</el-button>
+          <el-button
+            v-if="isSourceBuild && isSourceRunning && !installReady"
+            type="primary"
+            disabled
+          >{{ t.updateDialog.sourceSyncBuilding }}</el-button>
+          <el-button
+            v-if="isSourceBuild && !installReady && !isSourceRunning && !isInstalling"
+            type="primary"
+            :loading="isSourceStarting"
+            @click="handleStartSourceUpdate"
+          >
+            <el-icon><Download /></el-icon>
+            {{ sourceError ? t.updateDialog.sourceRetryBuild : t.updateDialog.sourceSyncBuild }}
+          </el-button>
+
+          <el-button
+            v-if="!isSourceBuild && showDownloadButtons"
+            @click="handleSkipVersion"
+          >{{ t.updateDialog.skipVersion }}</el-button>
+          <el-button
+            v-if="!isSourceBuild && showDownloadButtons"
+            @click="handleCancel"
+          >{{ t.updateDialog.remindLater }}</el-button>
+          <el-button
+            v-if="!isSourceBuild && showDownloadButtons"
+            type="primary"
+            :loading="isDownloading"
+            @click="handleDownload"
+          >
+            <el-icon><Download /></el-icon>
+            {{ t.updateDialog.downloadAndInstall }}
+          </el-button>
+          <el-button
+            v-if="!isSourceBuild && isDownloading"
             type="primary"
             :loading="downloadPhase !== 'complete'"
             disabled
@@ -95,9 +147,21 @@
                 : t.updateDialog.downloading
             }}
           </el-button>
-          <el-button v-if="installReady" @click="handleCancel">{{ t.updateDialog.remindLater }}</el-button>
-          <el-button v-if="installReady" type="primary" @click="handleInstall(downloadedFilePath)">{{ t.updateDialog.installNow }}</el-button>
-          <el-button v-if="isInstalling" type="primary" disabled>{{ t.updateDialog.installing }}</el-button>
+
+          <el-button
+            v-if="installReady && !isInstalling"
+            @click="handleCancel"
+          >{{ t.updateDialog.remindLater }}</el-button>
+          <el-button
+            v-if="installReady && !isInstalling"
+            type="primary"
+            @click="handleInstall(downloadedFilePath, isSourceBuild ? 'nsis' : null)"
+          >{{ t.updateDialog.installNow }}</el-button>
+          <el-button
+            v-if="!isSourceBuild && isInstalling"
+            type="primary"
+            disabled
+          >{{ t.updateDialog.installing }}</el-button>
         </template>
       </div>
     </template>
@@ -154,7 +218,19 @@ const installFailedRank = ref(null)
 let installProgressUnlisten = null
 let installWaitTimer = null
 
+// 源码模式：fork 同步 + 本地 ninja/cpack 构建
+const isSourceStarting = ref(false)
+const isSourceRunning = ref(false)
+const sourceStage = ref('idle')
+const sourceStatusMessage = ref('')
+const sourceError = ref('')
+const sourceLogLines = ref([])
+let sourceProgressUnlisten = null
+const SOURCE_LOG_MAX = 300
+
 const isLatest = computed(() => !!props.updateInfo?.is_latest)
+
+const isSourceBuild = computed(() => props.updateInfo?.kind === 'source_build')
 
 const dialogTitle = computed(() => {
   const ver = props.updateInfo?.version || ''
@@ -309,6 +385,122 @@ const resetInstallProgress = () => {
   clearInstallWaitTimer()
 }
 
+// ---------- 源码模式：同步 fork + 本地构建 ----------
+
+const SOURCE_STAGE_RANKS = Object.freeze({
+  idle: -1,
+  fetch: 0,
+  push: 1,
+  merge: 2,
+  submodule: 3,
+  configure: 4,
+  build: 5,
+  package: 6,
+  complete: 7,
+})
+
+const SOURCE_STAGE_DEFAULT_KEYS = Object.freeze({
+  fetch: 'sourceStageFetch',
+  push: 'sourceStagePush',
+  merge: 'sourceStageMerge',
+  submodule: 'sourceStageSubmodule',
+  configure: 'sourceStageConfigure',
+  build: 'sourceStageBuild',
+  package: 'sourceStagePackage',
+  complete: 'sourceStageComplete',
+})
+
+const sourceSteps = computed(() => [
+  { key: 'fetch', label: t.value.updateDialog.sourceStepFetch },
+  { key: 'push', label: t.value.updateDialog.sourceStepPush },
+  { key: 'merge', label: t.value.updateDialog.sourceStepMerge },
+  { key: 'submodule', label: t.value.updateDialog.sourceStepSubmodule },
+  { key: 'configure', label: t.value.updateDialog.sourceStepConfigure },
+  { key: 'build', label: t.value.updateDialog.sourceStepBuild },
+  { key: 'package', label: t.value.updateDialog.sourceStepPackage },
+])
+
+const sourceStatusText = computed(() => {
+  if (sourceError.value) return sourceError.value
+  if (sourceStatusMessage.value) return sourceStatusMessage.value
+  const key = SOURCE_STAGE_DEFAULT_KEYS[sourceStage.value]
+  return key ? t.value.updateDialog[key] : t.value.updateDialog.sourceIdle
+})
+
+const sourceLogTail = computed(() => sourceLogLines.value.slice(-12).join('\n'))
+
+const getSourceStepStatus = (index) => {
+  const rank = SOURCE_STAGE_RANKS[sourceStage.value] ?? -1
+  if (sourceError.value) {
+    if (index < rank) return 'done'
+    if (index === rank) return 'failed'
+    return 'pending'
+  }
+  if (index < rank) return 'done'
+  if (index === rank) return 'active'
+  return 'pending'
+}
+
+const appendSourceLog = (line) => {
+  const next = sourceLogLines.value.concat(String(line))
+  sourceLogLines.value = next.length > SOURCE_LOG_MAX ? next.slice(next.length - SOURCE_LOG_MAX) : next
+}
+
+const clearSourceProgressListener = () => {
+  if (sourceProgressUnlisten) {
+    sourceProgressUnlisten()
+    sourceProgressUnlisten = null
+  }
+}
+
+const resetSourceState = () => {
+  isSourceStarting.value = false
+  isSourceRunning.value = false
+  sourceStage.value = 'idle'
+  sourceStatusMessage.value = ''
+  sourceError.value = ''
+  sourceLogLines.value = []
+  clearSourceProgressListener()
+}
+
+const handleStartSourceUpdate = async () => {
+  resetSourceState()
+  isSourceStarting.value = true
+  isSourceRunning.value = true
+  let progressUnlisten = null
+
+  try {
+    const { invoke, listen } = await getTauriApis()
+    progressUnlisten = await listen('source-update-progress', (event) => {
+      const payload = event.payload || {}
+      if (payload.stage && SOURCE_STAGE_RANKS[payload.stage] !== undefined) {
+        sourceStage.value = payload.stage
+      }
+      if (payload.message) sourceStatusMessage.value = payload.message
+      if (payload.line) appendSourceLog(payload.line)
+    })
+    sourceProgressUnlisten = progressUnlisten
+
+    const artifactPath = await invoke('start_source_update')
+    sourceStage.value = 'complete'
+    sourceStatusMessage.value = ''
+    downloadedFilePath.value = artifactPath
+    isSourceRunning.value = false
+    ElMessage.success(t.value.updateDialog.sourceBuildComplete)
+    await new Promise((resolve) => setTimeout(resolve, 800))
+    await handleInstall(artifactPath, 'nsis')
+  } catch (error) {
+    sourceError.value = String(error?.message ?? error)
+  } finally {
+    isSourceRunning.value = false
+    isSourceStarting.value = false
+    if (progressUnlisten) {
+      await progressUnlisten()
+    }
+    sourceProgressUnlisten = null
+  }
+}
+
 const getTauriApis = async () => {
   const [{ invoke }, { listen }] = await Promise.all([import('@tauri-apps/api/core'), import('@tauri-apps/api/event')])
   return { invoke, listen }
@@ -394,10 +586,11 @@ const handleDownload = async () => {
   }
 }
 
-const handleInstall = async (filePath) => {
+const handleInstall = async (filePath, installerKind = null) => {
   try {
+    const isSource = isSourceBuild.value || installerKind === 'nsis'
     await ElMessageBox.confirm(
-      t.value.updateDialog.installConfirm,
+      isSource ? t.value.updateDialog.sourceInstallConfirm : t.value.updateDialog.installConfirm,
       t.value.updateDialog.installTitle,
       { confirmButtonText: t.value.updateDialog.installConfirmBtn, cancelButtonText: t.value.updateDialog.cancelBtn, type: 'warning' }
     )
@@ -424,19 +617,27 @@ const handleInstall = async (filePath) => {
       if (payload.terminal) clearInstallWaitTimer()
     })
 
-    await invoke('install_update', { filePath, targetVersion: props.updateInfo?.version || null })
+    await invoke('install_update', {
+      filePath,
+      targetVersion: props.updateInfo?.version || null,
+      installerKind,
+    })
 
     ElMessage.success(t.value.updateDialog.installStarted)
   } catch (error) {
-    if (error !== 'cancel') {
-      installFailedRank.value = Math.max(currentInstallRank.value, 0)
-      installStage.value = 'failed'
-      installDetail.value = String(error)
-      clearInstallWaitTimer()
-      clearInstallProgressListener()
-      ElMessage.error(t.value.updateDialog.installError.replace('{error}', error))
+    if (error === 'cancel') {
       isInstalling.value = false
+      resetInstallProgress()
+      clearInstallProgressListener()
+      return
     }
+    installFailedRank.value = Math.max(currentInstallRank.value, 0)
+    installStage.value = 'failed'
+    installDetail.value = String(error)
+    clearInstallWaitTimer()
+    clearInstallProgressListener()
+    ElMessage.error(t.value.updateDialog.installError.replace('{error}', error))
+    isInstalling.value = false
   }
 }
 
@@ -474,11 +675,13 @@ const resetState = () => {
   isInstalling.value = false
   resetInstallProgress()
   clearInstallProgressListener()
+  resetSourceState()
 }
 
 onBeforeUnmount(() => {
   clearInstallWaitTimer()
   clearInstallProgressListener()
+  clearSourceProgressListener()
 })
 
 watch(
@@ -576,6 +779,77 @@ watch(
   border: 1px solid #d9ecff;
   border-radius: @border-radius;
   background: #ecf5ff;
+}
+
+.source-progress {
+  margin-top: 14px;
+  margin-bottom: 4px;
+  padding: 14px 16px;
+  border: 1px solid #dcdfe6;
+  border-radius: @border-radius;
+  background: #f8fafc;
+
+  .download-status {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 9px;
+    min-height: 28px;
+    margin-bottom: 10px;
+  }
+
+  .download-spinner {
+    width: 14px;
+    height: 14px;
+    flex: 0 0 14px;
+    border: 2px solid #c6e2ff;
+    border-top-color: #409eff;
+    border-radius: 50%;
+    animation: spin 0.9s linear infinite;
+  }
+
+  .download-complete-mark {
+    width: 18px;
+    height: 18px;
+    color: #67c23a;
+    font-size: 18px;
+    font-weight: 700;
+    line-height: 18px;
+  }
+
+  .progress-text {
+    margin: 0;
+    color: #606266;
+    font-size: 13px;
+    line-height: 1.5;
+  }
+}
+
+.source-log {
+  max-height: 150px;
+  margin: 10px 0 0;
+  padding: 8px 10px;
+  overflow: auto;
+  border-radius: 6px;
+  background: #1e1e1e;
+  color: #d4d4d4;
+  font-family: Consolas, Menlo, monospace;
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.source-error {
+  margin: 10px 0 0;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: #fef0f0;
+  color: #f56c6c;
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-all;
 }
 
 .download-progress {

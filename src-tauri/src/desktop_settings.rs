@@ -50,6 +50,8 @@ pub struct DesktopSettings {
     pub dev_mode: bool,
     pub log_level: String,
     pub toolbar_shortcut_enabled: bool,
+    /// 本地 Sunshine 源码目录；配置后“检查更新”改为比对上游提交并本地构建安装。
+    pub sunshine_source_dir: Option<String>,
 }
 
 impl Default for DesktopSettings {
@@ -65,6 +67,7 @@ impl Default for DesktopSettings {
             dev_mode: false,
             log_level: "info".to_string(),
             toolbar_shortcut_enabled: true,
+            sunshine_source_dir: None,
         }
     }
 }
@@ -386,6 +389,8 @@ pub async fn save_desktop_settings(
         let _settings_guard = lock_desktop_settings();
         // 桌宠快捷键只由桌宠设置页的独立命令修改，避免普通设置页保存旧快照时覆盖它。
         settings.toolbar_shortcut_enabled = load_desktop_settings_from_disk().toolbar_shortcut_enabled;
+        // 本地源码目录同理，只由 set_sunshine_source_dir 独立命令修改。
+        settings.sunshine_source_dir = load_desktop_settings_from_disk().sunshine_source_dir;
         normalize(&mut settings);
         save_desktop_settings_to_disk(&settings)?;
     }
@@ -443,6 +448,28 @@ pub fn set_toolbar_shortcut_enabled(
     }
 
     Ok(toolbar_shortcut_status(&app, enabled))
+}
+
+/// 设置本地 Sunshine 源码目录；传 `None` 或空白字符串清除。
+///
+/// 这里只做“确实是个目录”的边界校验，git/构建树层面的校验由
+/// `update::source::validate_sunshine_source_dir` 在使用时完成。
+#[tauri::command]
+pub fn set_sunshine_source_dir(path: Option<String>) -> Result<(), String> {
+    let normalized = match path.as_deref().map(str::trim) {
+        None | Some("") => None,
+        Some(dir) => {
+            if !Path::new(dir).is_dir() {
+                return Err(format!("目录不存在：{dir}"));
+            }
+            Some(dir.to_string())
+        }
+    };
+
+    let _settings_guard = lock_desktop_settings();
+    let mut settings = load_desktop_settings_from_disk();
+    settings.sunshine_source_dir = normalized;
+    save_desktop_settings_to_disk(&settings)
 }
 
 pub fn apply_startup_settings(app: &AppHandle, settings: &DesktopSettings) {
