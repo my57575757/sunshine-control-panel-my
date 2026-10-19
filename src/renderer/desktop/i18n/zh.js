@@ -1740,6 +1740,7 @@ export const zh = {
 
     // 源码模式（fork 同步 + 本地构建）
     sourceSyncBuild: '同步并本地构建',
+    sourceRebuild: '重新同步并本地构建',
     sourceSyncBuilding: '同步与构建进行中…',
     sourceRetryBuild: '失败，重新同步构建',
     sourceBuildComplete: '本地构建完成，准备安装',

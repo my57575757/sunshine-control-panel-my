@@ -1740,6 +1740,7 @@ Output only one short sentence, no explanation. Reply in English.`,
 
     // Source build mode (fork sync + local build)
     sourceSyncBuild: 'Sync fork & build locally',
+    sourceRebuild: 'Re-sync and build locally',
     sourceSyncBuilding: 'Syncing and building…',
     sourceRetryBuild: 'Failed — retry sync & build',
     sourceBuildComplete: 'Local build complete, preparing install',

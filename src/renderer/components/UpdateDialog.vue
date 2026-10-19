@@ -3,7 +3,7 @@
     v-model="visible"
     :title="dialogTitle"
     width="min(720px, 92vw)"
-    :close-on-click-modal="isLatest"
+    :close-on-click-modal="isLatest && !isSourceRunning && !isInstalling"
     :close-on-press-escape="isLatest || (!isInstalling && !isDownloading && !isSourceRunning)"
     :show-close="!isInstalling && !isDownloading && !isSourceRunning"
   >
@@ -55,7 +55,7 @@
       </div>
 
       <!-- 源码模式：同步 + 本地构建进度 -->
-      <div v-if="isSourceBuild && !isLatest && (isSourceRunning || sourceLogLines.length)" class="source-progress">
+      <div v-if="isSourceBuild && (isSourceRunning || sourceLogLines.length)" class="source-progress">
         <div class="download-status">
           <span v-if="isSourceRunning && !sourceError" class="download-spinner"></span>
           <span v-else-if="!sourceError" class="download-complete-mark">✓</span>
@@ -100,12 +100,12 @@
       </div>
 
       <!-- 安装包已就绪 (下载完成/本地构建完成/上次已下载) -->
-      <div v-if="!isLatest && installReady" class="install-ready-panel">
+      <div v-if="(!isLatest || isSourceBuild) && installReady" class="install-ready-panel">
         <p class="install-note">{{ isSourceBuild ? t.updateDialog.sourceInstallReadyHint : t.updateDialog.installReadyHint }}</p>
       </div>
 
       <!-- 安装提示 (仅新版本) -->
-      <div v-if="!isLatest && isInstalling" class="install-progress-panel">
+      <div v-if="isInstalling" class="install-progress-panel">
         <div class="install-status">
           <span class="install-spinner" :class="{ failed: installStage === 'failed' }"></span>
           <div>
@@ -134,7 +134,24 @@
       <div class="dialog-footer">
         <template v-if="isLatest">
           <el-button @click="handleOpenBrowser">{{ t.updateDialog.viewInBrowser }}</el-button>
-          <el-button type="primary" @click="handleCancel">{{ t.updateDialog.close }}</el-button>
+          <el-button
+            v-if="isSourceBuild && isSourceRunning"
+            type="primary"
+            disabled
+          >{{ t.updateDialog.sourceSyncBuilding }}</el-button>
+          <el-button
+            v-else-if="isSourceBuild && !isInstalling"
+            type="primary"
+            :loading="isSourceStarting"
+            @click="handleStartSourceUpdate"
+          >
+            <el-icon><Download /></el-icon>
+            {{ sourceError ? t.updateDialog.sourceRetryBuild : t.updateDialog.sourceRebuild }}
+          </el-button>
+          <el-button
+            v-if="!isSourceRunning && !isInstalling"
+            @click="handleCancel"
+          >{{ t.updateDialog.close }}</el-button>
         </template>
         <template v-else>
           <el-button @click="handleOpenBrowser">{{ t.updateDialog.openInBrowser }}</el-button>
