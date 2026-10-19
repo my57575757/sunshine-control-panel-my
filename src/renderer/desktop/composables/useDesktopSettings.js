@@ -15,6 +15,7 @@ export const defaultDesktopSettings = {
   logLevel: 'info',
   // 由独立命令 set_sunshine_source_dir 管理，普通设置保存时以后端现值为准，避免被全量写回清空
   sunshineSourceDir: null,
+  textContextEnabled: true,
 }
 
 export const desktopSettings = ref({ ...defaultDesktopSettings })

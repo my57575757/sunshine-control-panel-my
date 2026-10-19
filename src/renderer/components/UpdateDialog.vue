@@ -212,8 +212,8 @@
 import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Download, FolderOpened, ArrowDown } from '@element-plus/icons-vue'
-import MarkdownIt from 'markdown-it'
 import { useI18n } from '../desktop/i18n/index.js'
+import { renderReleaseNotes } from '../utils/releaseNotes.js'
 
 const { t } = useI18n()
 
@@ -280,18 +280,8 @@ const dialogTitle = computed(() => {
   return t.value.updateDialog.titleNew.replace('{version}', ver).replace('{current}', props.currentVersion)
 })
 
-const md = new MarkdownIt({ html: true, breaks: true, linkify: true })
-
-// 所有链接添加 target="_blank" rel="noopener"，让 Tauri 在系统浏览器中打开
-const defaultLinkRender = md.renderer.rules.link_open || ((tokens, idx, options, _env, self) => self.renderToken(tokens, idx, options))
-md.renderer.rules.link_open = (tokens, idx, options, env, self) => {
-  tokens[idx].attrSet('target', '_blank')
-  tokens[idx].attrSet('rel', 'noopener')
-  return defaultLinkRender(tokens, idx, options, env, self)
-}
-
 const parsedReleaseNotes = computed(() =>
-  props.updateInfo?.release_notes ? md.render(props.updateInfo.release_notes) : ''
+  renderReleaseNotes(props.updateInfo?.release_notes)
 )
 
 const showDownloadButtons = computed(
@@ -300,7 +290,9 @@ const showDownloadButtons = computed(
 
 // 安装包已就绪：本次下载完成或上次会话已完整下载，可直接安装
 const installReady = computed(
-  () => !!downloadedFilePath.value && !isDownloading.value && !isInstalling.value
+  () => !!downloadedFilePath.value
+    && !isDownloading.value
+    && !isInstalling.value
 )
 
 const downloadStatusText = computed(() => {
@@ -648,6 +640,8 @@ const checkCachedInstaller = async () => {
     const cached = await invoke('check_cached_update', {
       filename,
       expectedSize: props.updateInfo.download_size || null,
+      expectedSha256: props.updateInfo.download_sha256 || null,
+      assetType: props.updateInfo.download_type || null,
     })
     if (
       cached &&
@@ -682,11 +676,14 @@ const handleDownload = async () => {
       applyDownloadProgress(event.payload)
     })
 
-    const filename = props.updateInfo.download_name || `sunshine-update-${props.updateInfo.version}.msi`
+    const filename = props.updateInfo.download_name || `sunshine-update-${props.updateInfo.version}.exe`
     const result = await invoke('download_update', {
       url: downloadUrl,
+      fallbackUrl: props.updateInfo.download_fallback_url || null,
       filename,
       expectedSize: props.updateInfo.download_size || null,
+      expectedSha256: props.updateInfo.download_sha256 || null,
+      assetType: props.updateInfo.download_type || null,
     })
     await progressUnlisten()
     progressUnlisten = null
@@ -752,6 +749,8 @@ const handleInstall = async (filePath, installerKind = null) => {
       filePath,
       targetVersion: props.updateInfo?.version || null,
       installerKind,
+      expectedSize: props.updateInfo?.download_size || null,
+      expectedSha256: props.updateInfo?.download_sha256 || null,
     })
 
     ElMessage.success(t.value.updateDialog.installStarted)

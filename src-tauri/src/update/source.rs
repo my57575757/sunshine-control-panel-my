@@ -274,8 +274,11 @@ pub(super) async fn check_source_update(
         version: status.head_hash.clone(),
         release_notes,
         download_url: None,
+        download_fallback_url: None,
         download_name: None,
         download_size: None,
+        download_sha256: None,
+        download_type: None,
         release_page: "https://github.com/AlkaidLab/foundation-sunshine/commits/master"
             .to_string(),
         is_latest: status.behind == 0,

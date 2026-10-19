@@ -7,28 +7,27 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use crate::github_download::{
-    self, DEFAULT_IDLE_TIMEOUT, DEFAULT_RESPONSE_TIMEOUT, DownloadAttemptPhase, DownloadRequest,
+    self, DEFAULT_IDLE_TIMEOUT, DEFAULT_RESPONSE_TIMEOUT, DownloadAttemptPhase, DownloadCandidate,
+    DownloadProgress, DownloadRequest,
 };
 
 use super::{
-    COMPONENT_DOWNLOAD_OVERALL_TIMEOUT, COMPONENT_VERSION, HIDMAESTRO_SHA256, HIDMAESTRO_VERSION,
-    MAX_SIDECAR_PACKAGE_BYTES, MAX_SIDECAR_PACKAGE_MANIFEST_BYTES, PROTOCOL_VERSION,
-    ProgressReporter, SIDECAR_EXE, SIDECAR_PACKAGE_ASSET, SIDECAR_PACKAGE_LICENSE,
-    SIDECAR_PACKAGE_MANIFEST, SIDECAR_PACKAGE_TARGET, report_progress,
+    COMPONENT_DOWNLOAD_OVERALL_TIMEOUT, COMPONENT_VERSION, HIDMAESTRO_VERSION,
+    LEGACY_HIDMAESTRO_1_7_3_SHA256, MAX_SIDECAR_PACKAGE_BYTES, MAX_SIDECAR_PACKAGE_MANIFEST_BYTES,
+    PROTOCOL_VERSION, ProgressReporter, SIDECAR_EXE, SIDECAR_PACKAGE_ASSET,
+    SIDECAR_PACKAGE_LICENSE, SIDECAR_PACKAGE_MANIFEST, SIDECAR_PACKAGE_TARGET, report_progress,
 };
 use crate::usbip::USBIP_SHA256;
 
 #[derive(Clone, Default)]
 pub(crate) struct LocalComponentPackages {
     pub(crate) sidecar: Option<PathBuf>,
-    pub(crate) hidmaestro: Option<PathBuf>,
     pub(crate) usbip: Option<PathBuf>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum LocalComponentKind {
     Sidecar,
-    Hidmaestro,
     Usbip,
 }
 
@@ -73,6 +72,7 @@ pub(crate) struct ComponentDownloadSpec<'a> {
     pub(crate) url: &'a str,
     pub(crate) destination: &'a Path,
     pub(crate) expected_size: Option<u64>,
+    pub(crate) expected_sha256: Option<&'a str>,
     pub(crate) max_size: u64,
     pub(crate) stage: &'a str,
     pub(crate) progress_start: u32,
@@ -84,36 +84,58 @@ pub(crate) async fn download_component_asset(
     spec: ComponentDownloadSpec<'_>,
     progress: &ProgressReporter<'_>,
 ) -> Result<(), String> {
+    download_component_asset_internal(spec, None, progress).await
+}
+
+pub(crate) async fn download_component_asset_from_candidates(
+    spec: ComponentDownloadSpec<'_>,
+    candidates: &[DownloadCandidate],
+    progress: &ProgressReporter<'_>,
+) -> Result<(), String> {
+    download_component_asset_internal(spec, Some(candidates), progress).await
+}
+
+async fn download_component_asset_internal(
+    spec: ComponentDownloadSpec<'_>,
+    candidates: Option<&[DownloadCandidate]>,
+    progress: &ProgressReporter<'_>,
+) -> Result<(), String> {
     report_progress(progress, spec.stage, spec.progress_start);
     let mut highest_progress = spec.progress_start;
-    github_download::download_to_file_with_fallbacks(
-        DownloadRequest {
-            url: spec.url,
-            destination: spec.destination,
-            expected_size: spec.expected_size,
-            max_size: Some(spec.max_size),
-            user_agent: "foundation-sunshine-dualsense-component",
-            connect_timeout: std::time::Duration::from_secs(10),
-            response_timeout: DEFAULT_RESPONSE_TIMEOUT,
-            idle_timeout: DEFAULT_IDLE_TIMEOUT,
-            overall_timeout: Some(COMPONENT_DOWNLOAD_OVERALL_TIMEOUT),
-        },
-        |event| {
-            if event.phase != DownloadAttemptPhase::Downloading || event.total == 0 {
-                return;
-            }
-            let value = spec.progress_start
-                + (event.downloaded.saturating_mul(spec.progress_span as u64) / event.total)
-                    .min(spec.progress_span as u64) as u32;
-            if value > highest_progress {
-                highest_progress = value;
-                report_progress(progress, spec.stage, value);
-            }
-        },
-    )
-    .await
-    .map(|_| ())
-    .map_err(|error| format!("{}: download failed: {error}", spec.error_code))
+    let request = DownloadRequest {
+        url: spec.url,
+        destination: spec.destination,
+        expected_size: spec.expected_size,
+        expected_sha256: spec.expected_sha256,
+        max_size: Some(spec.max_size),
+        user_agent: "foundation-sunshine-dualsense-component",
+        connect_timeout: std::time::Duration::from_secs(10),
+        response_timeout: DEFAULT_RESPONSE_TIMEOUT,
+        idle_timeout: DEFAULT_IDLE_TIMEOUT,
+        overall_timeout: Some(COMPONENT_DOWNLOAD_OVERALL_TIMEOUT),
+    };
+    let mut on_progress = |event: DownloadProgress| {
+        if event.phase != DownloadAttemptPhase::Downloading || event.total == 0 {
+            return;
+        }
+        let value = spec.progress_start
+            + (event.downloaded.saturating_mul(spec.progress_span as u64) / event.total)
+                .min(spec.progress_span as u64) as u32;
+        if value > highest_progress {
+            highest_progress = value;
+            report_progress(progress, spec.stage, value);
+        }
+    };
+    let result = match candidates {
+        Some(candidates) => {
+            github_download::download_to_file_from_candidates(request, candidates, &mut on_progress)
+                .await
+        }
+        None => github_download::download_to_file_with_fallbacks(request, &mut on_progress).await,
+    };
+    result
+        .map(|_| ())
+        .map_err(|error| format!("{}: download failed: {error}", spec.error_code))
 }
 
 pub(crate) fn component_root() -> PathBuf {
@@ -247,7 +269,6 @@ where
         };
         let (slot, component) = match kind {
             LocalComponentKind::Sidecar => (&mut classified.sidecar, "Sunshine Sidecar"),
-            LocalComponentKind::Hidmaestro => (&mut classified.hidmaestro, "HIDMaestro"),
             LocalComponentKind::Usbip => (&mut classified.usbip, "USB/IP"),
         };
         if slot.replace(package.to_path_buf()).is_some() {
@@ -264,9 +285,7 @@ pub(crate) fn local_component_kind(
     digest: &str,
     sidecar_digest: Option<&str>,
 ) -> Option<LocalComponentKind> {
-    if digest.eq_ignore_ascii_case(HIDMAESTRO_SHA256) {
-        Some(LocalComponentKind::Hidmaestro)
-    } else if digest.eq_ignore_ascii_case(USBIP_SHA256) {
+    if digest.eq_ignore_ascii_case(USBIP_SHA256) {
         Some(LocalComponentKind::Usbip)
     } else if sidecar_digest.is_some_and(|expected| digest.eq_ignore_ascii_case(expected)) {
         Some(LocalComponentKind::Sidecar)
@@ -316,8 +335,15 @@ pub(crate) fn installed_component_manifest() -> Option<InstalledComponentManifes
     serde_json::from_slice(&contents).ok()
 }
 
-/// Verifies only the Sunshine-owned executable before it is launched from the active install.
-/// `sha256` is the HIDMaestro archive digest and must not be compared with an extracted DLL.
+pub(crate) fn verified_sidecar_path() -> Result<PathBuf, String> {
+    let executable = sidecar_path();
+    let manifest = installed_component_manifest()
+        .ok_or_else(|| "DS5-PKG-001: installed component manifest is missing".to_string())?;
+    validate_sidecar_integrity(&executable, &manifest)?;
+    Ok(executable)
+}
+
+/// Verify the installed executable and Core before capability probing.
 pub(crate) fn validate_sidecar_integrity(
     executable: &Path,
     manifest: &InstalledComponentManifest,
@@ -327,14 +353,17 @@ pub(crate) fn validate_sidecar_integrity(
             .sidecar_sha256
             .bytes()
             .all(|byte| byte.is_ascii_hexdigit());
-    if manifest.sidecar_file != SIDECAR_EXE || !valid_digest {
+    if manifest.component_version != COMPONENT_VERSION
+        || manifest.sidecar_file != SIDECAR_EXE
+        || !valid_digest
+    {
         return Err("DS5-PKG-001: installed sidecar manifest is invalid".to_string());
     }
     let actual = sha256_file(executable)?;
     if !actual.eq_ignore_ascii_case(&manifest.sidecar_sha256) {
         return Err("DS5-PKG-001: installed sidecar integrity check failed".to_string());
     }
-    Ok(())
+    validate_core_integrity(&executable.with_file_name("HIDMaestro.Core.dll"), manifest)
 }
 
 pub(crate) fn component_update_available(manifest: Option<&InstalledComponentManifest>) -> bool {
@@ -351,7 +380,8 @@ pub(crate) fn component_matches_current_runtime(
     };
     manifest.component_version == COMPONENT_VERSION
         && manifest.hidmaestro_version == HIDMAESTRO_VERSION
-        && manifest.sha256.eq_ignore_ascii_case(HIDMAESTRO_SHA256)
+        && manifest.sha256.len() == 64
+        && manifest.sha256.bytes().all(|byte| byte.is_ascii_hexdigit())
         && manifest.protocol == PROTOCOL_VERSION
         && manifest.sidecar_file == SIDECAR_EXE
         && genshin_compatibility_available
@@ -373,4 +403,41 @@ pub(crate) fn sha256_file(path: &Path) -> Result<String, String> {
         digest.update(&buffer[..count]);
     }
     Ok(format!("{:x}", digest.finalize()))
+}
+
+// Before complete Sidecar packages, sha256 held the upstream ZIP digest.
+// Preserve recovery of that known legacy Core without a second runtime manifest.
+pub(crate) fn validate_core_integrity(
+    core: &Path,
+    manifest: &InstalledComponentManifest,
+) -> Result<(), String> {
+    let actual = sha256_file(core)?;
+    let legacy = legacy_core_digest_matches(manifest, &actual);
+    if !actual.eq_ignore_ascii_case(&manifest.sha256) && !legacy {
+        return Err("DS5-PKG-001: installed Core integrity check failed".to_string());
+    }
+    Ok(())
+}
+
+pub(crate) fn legacy_core_digest_matches(
+    manifest: &InstalledComponentManifest,
+    actual: &str,
+) -> bool {
+    if manifest.component_version == COMPONENT_VERSION {
+        return false;
+    }
+    // Only versions shipped by this Control Panel. DLL hashes were derived
+    // from the archives whose digests the old installer pinned.
+    let (archive, core) = match manifest.hidmaestro_version.as_str() {
+        "v1.7.3" => (
+            LEGACY_HIDMAESTRO_1_7_3_SHA256,
+            "95c6d3ec0d41cd7b3adda80da3ffbcd19c9466cc50e08a973c7745a16c7e0bde",
+        ),
+        "v1.6.2" => (
+            "6ae8df0cf317baf7e65777e2929f618916a67831b5ff1162205310f2c08b80ff",
+            "df59cd5b6031311f03031c32b794901fc1f45503410f4f6ad55eaa854cee8746",
+        ),
+        _ => return false,
+    };
+    manifest.sha256.eq_ignore_ascii_case(archive) && actual.eq_ignore_ascii_case(core)
 }

@@ -52,6 +52,7 @@ pub struct DesktopSettings {
     pub toolbar_shortcut_enabled: bool,
     /// 本地 Sunshine 源码目录；配置后“检查更新”改为比对上游提交并本地构建安装。
     pub sunshine_source_dir: Option<String>,
+    pub text_context_enabled: bool,
 }
 
 impl Default for DesktopSettings {
@@ -68,6 +69,7 @@ impl Default for DesktopSettings {
             log_level: "info".to_string(),
             toolbar_shortcut_enabled: true,
             sunshine_source_dir: None,
+            text_context_enabled: true,
         }
     }
 }
@@ -395,6 +397,8 @@ pub async fn save_desktop_settings(
         save_desktop_settings_to_disk(&settings)?;
     }
     apply_auto_start(&settings)?;
+    #[cfg(target_os = "windows")]
+    crate::text_context::set_enabled(settings.text_context_enabled);
     crate::tray::refresh_menu(&app);
     crate::logger::set_log_level(&settings.log_level);
     apply_dev_mode(&app, settings.dev_mode);
@@ -475,6 +479,8 @@ pub fn set_sunshine_source_dir(path: Option<String>) -> Result<(), String> {
 pub fn apply_startup_settings(app: &AppHandle, settings: &DesktopSettings) {
     crate::logger::set_log_level(&settings.log_level);
     apply_dev_mode(app, settings.dev_mode);
+    #[cfg(target_os = "windows")]
+    crate::text_context::set_enabled(settings.text_context_enabled);
     if let Err(e) = apply_auto_start(settings) {
         log::warn!("Failed to reconcile GUI auto-start registration: {}", e);
     }
@@ -606,6 +612,20 @@ mod tests {
                 .expect("toolbar shortcut setting should deserialize");
 
         assert!(!settings.toolbar_shortcut_enabled);
+    }
+
+    #[test]
+    fn text_context_observation_is_enabled_by_default_and_migrates() {
+        assert!(DesktopSettings::default().text_context_enabled);
+
+        let settings: DesktopSettings = serde_json::from_str(r#"{"autoStart":false}"#)
+            .expect("legacy desktop settings should deserialize");
+        assert!(settings.text_context_enabled);
+
+        let disabled: DesktopSettings =
+            serde_json::from_str(r#"{"textContextEnabled":false}"#)
+                .expect("text context setting should deserialize");
+        assert!(!disabled.text_context_enabled);
     }
 
     #[test]

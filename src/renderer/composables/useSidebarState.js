@@ -2,6 +2,7 @@ import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { ElMessage } from 'element-plus'
 import { useRouter, ROUTES } from './useRouter.js'
 import { useI18n } from '../desktop/i18n/index.js'
+import { formatMessage } from '../shared/format-message.js'
 
 const STORAGE_KEYS = {
   SKIPPED_VERSION: 'sunshine-skipped-version',
@@ -58,6 +59,8 @@ export function useSidebarState() {
   // 状态定义
   const isCollapsed = ref(false)
   const isDark = ref(true)
+  const themeMode = ref('system')
+  const systemTheme = window.matchMedia('(prefers-color-scheme: dark)')
   const isMaximized = ref(false)
   const isAdmin = ref(true)
   const showUpdateDialog = ref(false)
@@ -70,8 +73,6 @@ export function useSidebarState() {
   const cleanupFns = []
 
   // 计算属性
-  const showVddSettings = computed(() => router.isRoute(ROUTES.VDD_SETTINGS))
-  const showWelcome = computed(() => router.isRoute(ROUTES.WELCOME))
   const currentTheme = computed(() => (isDark.value ? THEME.DARK : THEME.LIGHT))
 
   /**
@@ -79,17 +80,19 @@ export function useSidebarState() {
    */
   const syncTheme = () => {
     document.documentElement?.setAttribute('data-bs-theme', currentTheme.value)
-    localStorage.setItem(STORAGE_KEYS.THEME, currentTheme.value)
+    localStorage.setItem(STORAGE_KEYS.THEME, themeMode.value)
+    document.documentElement.style.colorScheme = currentTheme.value
   }
 
   /**
    * 切换主题
    */
-  const toggleTheme = () => {
-    isDark.value = !isDark.value
+  const setTheme = (mode) => {
+    if (!['light', 'dark', 'system'].includes(mode)) return
+    themeMode.value = mode
+    isDark.value = mode === 'system' ? systemTheme.matches : mode === THEME.DARK
     syncTheme()
     postMessageToIframes({ type: 'theme-sync', theme: currentTheme.value })
-    ElMessage.success(isDark.value ? '已切换到深色模式' : '已切换到浅色模式')
   }
 
   /**
@@ -109,7 +112,6 @@ export function useSidebarState() {
   const openControllersHub = () => router.navigate(ROUTES.CONTROLLERS_HUB)
   // RTX HDR 的定向入口也进入公共 HDR 管理页；具体实现由页面内的组件卡片负责。
   const openRtxHdr = () => router.navigate(ROUTES.HDR_ENHANCED)
-  const goHome = () => router.goHome()
 
   /**
    * 忽略指定版本的更新
@@ -119,7 +121,7 @@ export function useSidebarState() {
     const normalized = normalizeVersion(version)
     skippedVersion.value = normalized
     localStorage.setItem(STORAGE_KEYS.SKIPPED_VERSION, normalized)
-    ElMessage.info(`已忽略版本 ${version}，下次自动检查更新时将跳过此版本`)
+    ElMessage.info(formatMessage(t.value.toolActions.versionSkipped, { version }))
   }
 
   /**
@@ -185,10 +187,12 @@ export function useSidebarState() {
    */
   const initTheme = () => {
     const savedTheme = localStorage.getItem(STORAGE_KEYS.THEME)
-    isDark.value = savedTheme
-      ? savedTheme === THEME.DARK
-      : window.matchMedia('(prefers-color-scheme: dark)').matches
-    syncTheme()
+    setTheme(['light', 'dark', 'system'].includes(savedTheme) ? savedTheme : 'system')
+    const handleSystemTheme = () => {
+      if (themeMode.value === 'system') setTheme('system')
+    }
+    systemTheme.addEventListener('change', handleSystemTheme)
+    cleanupFns.push(() => systemTheme.removeEventListener('change', handleSystemTheme))
   }
 
   /**
@@ -245,7 +249,8 @@ export function useSidebarState() {
     const unlistenCheckResult = await listen('update-check-result', ({ payload }) => {
       const { error } = payload
       if (error) {
-        ElMessage.error(`检查更新失败: ${error}`)
+        console.error('Update check failed:', error)
+        ElMessage.error(t.value.toolActions.checkUpdatesFailed)
       }
     })
     cleanupFns.push(unlistenCheckResult)
@@ -270,12 +275,7 @@ export function useSidebarState() {
     // 优先初始化偏好设置，确保后端在检查更新前能读取到正确的偏好
     await initIncludePrerelease()
     // 然后并行初始化其他状态
-    await Promise.all([
-      initAdminStatus(),
-      initWindowState(),
-      initVersion(),
-      initEventListeners(),
-    ])
+    await Promise.all([initAdminStatus(), initWindowState(), initVersion(), initEventListeners()])
 
     // `--hidden` 启动时主窗口是按需创建的；等监听器就绪后再启动一次幂等的自动检查，
     // 确保发现更新时原生对话框能够接收到事件。
@@ -297,20 +297,17 @@ export function useSidebarState() {
   return {
     // 状态
     isCollapsed,
-    isDark,
+    themeMode,
     isMaximized,
     isAdmin,
-    showVddSettings,
-    showWelcome,
     showUpdateDialog,
     updateInfo,
     currentVersion,
-    skippedVersion,
     includePrerelease,
     router,
 
     // 方法
-    toggleTheme,
+    setTheme,
     toggleCollapse,
     openVddSettings,
     openWelcome,
@@ -320,9 +317,7 @@ export function useSidebarState() {
     openDualSense,
     openControllersHub,
     openRtxHdr,
-    goHome,
     skipVersion,
-    isVersionSkipped,
     setIncludePrerelease,
   }
 }
