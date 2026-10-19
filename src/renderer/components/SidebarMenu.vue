@@ -170,6 +170,7 @@
           :current-version="currentVersion"
           @close="showUpdateDialog = false"
           @skip-version="handleSkipVersion"
+          @update-info="handleUpdateInfo"
         />
       </div>
     </div>
@@ -265,6 +266,12 @@ const handleCheckForUpdates = async (channel = null) => {
 }
 
 const handleSkipVersion = (version) => skipVersion(version)
+
+// 在更新对话框内配置本地源码目录后，后端重新检查的结果（kind=source_build）
+// 直接替换当前 UpdateInfo，让对话框无缝切换到“同步并本地构建”模式。
+const handleUpdateInfo = (info) => {
+  if (info) updateInfo.value = info
+}
 
 // 菜单配置：从 toolsRegistry 读取（新增/修改菜单只需改那个文件）
 const toolsCtx = {

@@ -9,6 +9,46 @@
   >
     <div class="update-dialog-content">
 
+      <!-- 本地源码模式入口：配置有效目录后自动重新检查并切换为源码模式 -->
+      <div v-if="showSourcePicker" class="source-dir-panel">
+        <div class="source-dir-header" @click="sourceSectionOpen = !sourceSectionOpen">
+          <el-icon class="source-dir-icon"><FolderOpened /></el-icon>
+          <span class="source-dir-title">{{ t.updateDialog.sourceModeHeader }}</span>
+          <el-icon class="source-dir-arrow" :class="{ open: sourceSectionOpen }"><ArrowDown /></el-icon>
+        </div>
+        <div v-show="sourceSectionOpen" class="source-dir-body">
+          <p class="source-dir-desc">{{ t.settings.sourceDirDesc }}</p>
+          <div class="source-dir-row">
+            <input
+              type="text"
+              class="source-dir-input"
+              :placeholder="t.settings.sourceDirPlaceholder"
+              :value="sourceDirState.path || ''"
+              readonly
+            >
+            <el-button size="small" :loading="sourceDirBusy" @click="browseSourceDir">
+              {{ t.settings.sourceDirBrowse }}
+            </el-button>
+            <el-button
+              v-if="sourceDirState.path"
+              size="small"
+              :disabled="sourceDirBusy"
+              @click="clearSourceDir"
+            >{{ t.settings.sourceDirClear }}</el-button>
+          </div>
+          <p v-if="sourceRechecking" class="source-dir-hint muted">{{ t.updateDialog.sourceModeRechecking }}</p>
+          <p v-else-if="sourceDirBusy" class="source-dir-hint muted">{{ t.settings.sourceDirValidating }}</p>
+          <p v-else-if="sourceDirState.valid" class="source-dir-hint ok">
+            <span>✓ {{ t.settings.sourceDirValid }}</span>
+            <span v-if="sourceDirState.branch" class="source-dir-meta">（{{ sourceDirState.branch }}）</span>
+            <span class="source-dir-meta">
+              · {{ sourceDirState.source === 'detected' ? t.settings.sourceDirViaDetected : t.settings.sourceDirViaSetting }}
+            </span>
+          </p>
+          <p v-else-if="sourceDirState.path" class="source-dir-hint bad">✗ {{ sourceDirState.reason }}</p>
+        </div>
+      </div>
+
       <!-- 更新说明 -->
       <div v-if="updateInfo?.release_notes" class="release-notes">
         <div class="notes-content" v-html="parsedReleaseNotes"></div>
@@ -169,9 +209,9 @@
 </template>
 
 <script setup>
-import { ref, computed, watch, onBeforeUnmount } from 'vue'
+import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Download } from '@element-plus/icons-vue'
+import { Download, FolderOpened, ArrowDown } from '@element-plus/icons-vue'
 import MarkdownIt from 'markdown-it'
 import { useI18n } from '../desktop/i18n/index.js'
 
@@ -197,7 +237,7 @@ const props = defineProps({
   currentVersion: { type: String, default: '0.0.0' },
 })
 
-const emit = defineEmits(['update:modelValue', 'close', 'skip-version'])
+const emit = defineEmits(['update:modelValue', 'close', 'skip-version', 'update-info'])
 
 const visible = computed({
   get: () => props.modelValue,
@@ -463,6 +503,97 @@ const resetSourceState = () => {
   clearSourceProgressListener()
 }
 
+// ---------- 发布版模式下的本地源码目录入口 ----------
+
+const sourceSectionOpen = ref(true)
+const sourceDirBusy = ref(false)
+const sourceRechecking = ref(false)
+const sourcePickerAvailable = ref(false)
+const sourceDirState = ref({ valid: false, path: '', source: 'none', branch: '', reason: '' })
+
+const showSourcePicker = computed(
+  () =>
+    sourcePickerAvailable.value &&
+    !isSourceBuild.value &&
+    !isDownloading.value &&
+    !isInstalling.value &&
+    !isSourceRunning.value
+)
+
+const applySourceDirStatus = (status) => {
+  sourceDirState.value = {
+    valid: !!status?.valid,
+    path: status?.path || '',
+    source: status?.source || 'none',
+    branch: status?.branch || '',
+    reason: status?.reason || '',
+  }
+}
+
+const refreshSourceDirStatus = async () => {
+  sourceDirBusy.value = true
+  try {
+    const { invoke } = await getTauriApis()
+    const status = await invoke('validate_sunshine_source_dir', { path: null })
+    sourcePickerAvailable.value = true
+    applySourceDirStatus(status)
+    if (status?.valid) sourceSectionOpen.value = false
+  } catch {
+    // 非 Tauri 环境下隐藏整个源码入口
+    sourcePickerAvailable.value = false
+  } finally {
+    sourceDirBusy.value = false
+  }
+}
+
+const recheckSourceUpdate = async () => {
+  sourceRechecking.value = true
+  try {
+    const { invoke } = await getTauriApis()
+    const result = await invoke('check_for_updates')
+    if (result) emit('update-info', result)
+  } catch (error) {
+    ElMessage.error(
+      t.value.updateDialog.sourceModeRecheckFailed.replace('{error}', String(error?.message ?? error))
+    )
+  } finally {
+    sourceRechecking.value = false
+  }
+}
+
+const browseSourceDir = async () => {
+  sourceDirBusy.value = true
+  try {
+    const { open } = await import('@tauri-apps/plugin-dialog')
+    const dir = await open({ directory: true, multiple: false })
+    if (!dir) return
+    const { invoke } = await getTauriApis()
+    await invoke('set_sunshine_source_dir', { path: dir })
+    const status = await invoke('validate_sunshine_source_dir', { path: dir })
+    applySourceDirStatus(status)
+    if (status?.valid) await recheckSourceUpdate()
+  } catch (error) {
+    ElMessage.error(String(error?.message ?? error))
+  } finally {
+    sourceDirBusy.value = false
+  }
+}
+
+const clearSourceDir = async () => {
+  sourceDirBusy.value = true
+  try {
+    const { invoke } = await getTauriApis()
+    await invoke('set_sunshine_source_dir', { path: null })
+    const status = await invoke('validate_sunshine_source_dir', { path: null })
+    applySourceDirStatus(status)
+    sourceSectionOpen.value = true
+  } catch (error) {
+    ElMessage.error(String(error?.message ?? error))
+  } finally {
+    sourceDirBusy.value = false
+  }
+}
+
 const handleStartSourceUpdate = async () => {
   resetSourceState()
   isSourceStarting.value = true
@@ -678,6 +809,12 @@ const resetState = () => {
   resetSourceState()
 }
 
+// 对话框由父级 v-if 控制：每次打开都是全新挂载且 modelValue 初始即 true，
+// watch(modelValue) 不会触发，挂载时直接拉一次当前源码目录状态。
+onMounted(() => {
+  if (props.modelValue) refreshSourceDirStatus()
+})
+
 onBeforeUnmount(() => {
   clearInstallWaitTimer()
   clearInstallProgressListener()
@@ -690,6 +827,7 @@ watch(
     if (newVal) {
       resetState()
       checkCachedInstaller()
+      refreshSourceDirStatus()
     }
   }
 )
@@ -769,6 +907,104 @@ watch(
         text-decoration: underline;
       }
     }
+  }
+}
+
+.source-dir-panel {
+  margin-top: 14px;
+  border: 1px solid #dcdfe6;
+  border-radius: @border-radius;
+  background: #f8fafc;
+  overflow: hidden;
+
+  .source-dir-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 14px;
+    cursor: pointer;
+    user-select: none;
+
+    &:hover {
+      background: #f0f2f5;
+    }
+  }
+
+  .source-dir-icon {
+    color: #409eff;
+  }
+
+  .source-dir-title {
+    flex: 1;
+    font-size: 13px;
+    font-weight: 600;
+    color: #303133;
+  }
+
+  .source-dir-arrow {
+    color: #909399;
+    transition: transform 0.2s;
+
+    &.open {
+      transform: rotate(180deg);
+    }
+  }
+
+  .source-dir-body {
+    padding: 0 14px 12px;
+  }
+
+  .source-dir-desc {
+    margin: 4px 0 10px;
+    font-size: 12px;
+    line-height: 1.6;
+    color: #909399;
+  }
+
+  .source-dir-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .source-dir-input {
+    flex: 1;
+    min-width: 0;
+    padding: 6px 10px;
+    border: 1px solid #dcdfe6;
+    border-radius: 6px;
+    background: #fff;
+    color: #606266;
+    font-size: 12px;
+    font-family: Consolas, Menlo, monospace;
+
+    &:focus {
+      outline: none;
+      border-color: #409eff;
+    }
+  }
+
+  .source-dir-hint {
+    margin: 8px 0 0;
+    font-size: 12px;
+    line-height: 1.5;
+
+    &.muted {
+      color: #909399;
+    }
+
+    &.ok {
+      color: #67c23a;
+    }
+
+    &.bad {
+      color: #f56c6c;
+      word-break: break-all;
+    }
+  }
+
+  .source-dir-meta {
+    color: #909399;
   }
 }
 

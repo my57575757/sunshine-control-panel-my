@@ -1643,6 +1643,9 @@ Output only one short sentence, no explanation. Reply in English.`,
     sourceStepConfigure: 'CMake configure',
     sourceStepBuild: 'ninja build',
     sourceStepPackage: 'cpack package',
+    sourceModeHeader: 'Source build: sync fork, build and install locally',
+    sourceModeRechecking: 'Switched to source update mode, rechecking…',
+    sourceModeRecheckFailed: 'Recheck failed: {error}',
   },
 
   // === Web Stream ===

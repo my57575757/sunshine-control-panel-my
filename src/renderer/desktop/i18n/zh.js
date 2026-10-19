@@ -1643,6 +1643,9 @@ export const zh = {
     sourceStepConfigure: 'CMake configure',
     sourceStepBuild: 'ninja 编译',
     sourceStepPackage: 'cpack 打包',
+    sourceModeHeader: '源码更新：同步 fork 并本地构建安装',
+    sourceModeRechecking: '已切换为源码更新模式，正在重新检查…',
+    sourceModeRecheckFailed: '重新检查失败：{error}',
   },
 
   // === Web 串流 ===
