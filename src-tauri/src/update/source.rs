@@ -348,16 +348,208 @@ fn sync_blocking(dir: &Path, app: &AppHandle) -> Result<(), String> {
 
     emit_progress(app, "merge", Some("正在把上游 master 合并进本地 my_dev…"), None);
     // 本地 my_dev 可能领先（合并提交是预期形态）：先试快进，不行就显式合并。
-    if git_exit_code(dir, &["merge", "--ff-only", "upstream/master"])? != 0 {
-        if let Err(error) = git_ok(dir, &["merge", "--no-edit", "upstream/master"]) {
-            let _ = git_ok(dir, &["merge", "--abort"]);
-            return Err(format!("合并上游到 my_dev 失败，已执行 merge --abort，请手工解决冲突：{error}"));
-        }
+    if git_exit_code(dir, &["merge", "--ff-only", "upstream/master"])? != 0
+        && git_exit_code(dir, &["merge", "--no-edit", "upstream/master"])? != 0
+    {
+        // 合并不停住，最常见的是自带 fork 的控制面板子模块两边都前进了——Git 不会
+        // 递归合并子模块。这里自动进子模块合并上游所指提交再回主仓续合，
+        // 只有真正的内容冲突才中止交人工。
+        resolve_submodule_conflicts(dir, app)?;
     }
 
     emit_progress(app, "submodule", Some("正在同步子模块…"), None);
     git_ok(dir, &["submodule", "update", "--init", "--recursive"])?;
     Ok(())
+}
+
+/// 主仓 merge 因冲突停住时的自动收口：仅当所有冲突路径都是分叉的子模块时，
+/// 逐个进子模块合并上游所指提交，再回主仓暂存并完成 merge；出现普通文件冲突
+/// 或子模块内部冲突则回退并交人工。任何失败都 abort 主仓，不留半合并现场。
+fn resolve_submodule_conflicts(dir: &Path, app: &AppHandle) -> Result<(), String> {
+    if let Err(message) = resolve_submodule_conflicts_inner(dir, app) {
+        let _ = git_ok(dir, &["merge", "--abort"]);
+        return Err(message);
+    }
+    Ok(())
+}
+
+fn resolve_submodule_conflicts_inner(dir: &Path, app: &AppHandle) -> Result<(), String> {
+    let unmerged = git_trimmed(dir, &["diff", "--name-only", "--diff-filter=U"])?;
+    let paths: Vec<String> = unmerged
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(ToString::to_string)
+        .collect();
+    if paths.is_empty() {
+        return Err("合并上游失败但未发现冲突路径，请手工排查".to_string());
+    }
+
+    // 阶段一（只读 + 仅下载对象，不产生任何合并）：先确认每条冲突都是分叉的
+    // 子模块、子模块停在自己的分支且工作区干净、上游所指提交都能取到。任何一条
+    // 不满足都在动手前中止，避免把若干子模块合到一半再回退。
+    let mut pending: Vec<(String, PathBuf, String)> = Vec::new();
+    for rel_owned in &paths {
+        let rel = rel_owned.as_str();
+        let stage = git_trimmed(dir, &["ls-files", "-u", "--", rel])?;
+        let (_, theirs_sha) = parse_gitlink_stage(&stage).ok_or_else(|| {
+            format!("文件 {rel} 存在内容冲突（非子模块），自动合并不处理普通文件冲突")
+        })?;
+
+        let sub = dir.join(rel);
+        // 分离 HEAD 上合并会产生不被分支引用的提交，随后 submodule update 会让其
+        // “消失”，故要求子模块停在自己的分支（控制面板定制线即 my_dev）。
+        git_trimmed(&sub, &["symbolic-ref", "--quiet", "--short", "HEAD"]).map_err(|_| {
+            format!("子模块 {rel} 处于分离 HEAD，无法自动合并，请先在该子模块切到其分支")
+        })?;
+        let sub_dirty = git_trimmed(&sub, &["status", "--porcelain", "--untracked-files=no"])?;
+        if !sub_dirty.is_empty() {
+            return Err(format!("子模块 {rel} 有未提交的已跟踪改动，请先提交或暂存"));
+        }
+
+        pending.push((rel_owned.clone(), sub, theirs_sha));
+    }
+
+    for (rel, sub, sha) in &pending {
+        emit_progress(
+            app,
+            "submodule-merge",
+            Some(&format!("子模块 {rel} 与上游分叉，正在获取并自动合并…")),
+            None,
+        );
+        ensure_commit_available(sub, sha, dir, rel)?;
+    }
+
+    // 阶段二：校验与预取都已通过，逐个本地合并并把结果回写主仓索引。
+    for (rel, sub, sha) in &pending {
+        if git_exit_code(sub, &["merge", "--no-edit", sha])? != 0 {
+            let _ = git_ok(sub, &["merge", "--abort"]);
+            return Err(format!("子模块 {rel} 内部存在代码冲突，需手工解决"));
+        }
+        git_ok(dir, &["add", rel])?;
+    }
+
+    let remaining = git_trimmed(dir, &["diff", "--name-only", "--diff-filter=U"])?;
+    if !remaining.trim().is_empty() {
+        return Err(format!("仍有未解决的冲突：{remaining}"));
+    }
+    git_ok(dir, &["commit", "--no-edit"])?;
+    info!("已自动合并分叉子模块并完成主仓 merge");
+    Ok(())
+}
+
+/// 确保子模块本地持有 `sha` 对象。
+///
+/// 主仓 merge 不会递归抓取子模块提交，故上游所指 SHA 在子模块仓库里往往还不存在。
+/// 依次尝试：子模块已配置的各远程（通常 origin 即可），以及主仓上游 `.gitmodules`
+/// 为该路径声明的权威 URL。GitHub 允许按可达 SHA 抓取，故直接 `git fetch <源> <sha>`。
+fn ensure_commit_available(
+    sub: &Path,
+    sha: &str,
+    super_dir: &Path,
+    rel: &str,
+) -> Result<(), String> {
+    if commit_present(sub, sha) {
+        return Ok(());
+    }
+
+    let mut sources: Vec<String> = git_trimmed(sub, &["remote"])?
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(ToString::to_string)
+        .collect();
+
+    let gitmodules_ref = format!("{UPSTREAM_REMOTE}/master:.gitmodules");
+    if let Ok(content) = git_trimmed(super_dir, &["show", &gitmodules_ref]) {
+        if let Some(url) = parse_submodule_url(&content, rel) {
+            if !sources
+                .iter()
+                .any(|source| source.eq_ignore_ascii_case(&url))
+            {
+                sources.push(url);
+            }
+        }
+    }
+
+    for source in &sources {
+        if git_exit_code(sub, &["fetch", "--quiet", source, sha])? == 0 && commit_present(sub, sha)
+        {
+            return Ok(());
+        }
+    }
+    Err(format!(
+        "无法在子模块 {rel} 获取上游提交 {sha}，已尝试远程 [{}]，请手工 fetch 后重试",
+        sources.join(", ")
+    ))
+}
+
+fn commit_present(dir: &Path, sha: &str) -> bool {
+    let spec = format!("{sha}^{{commit}}");
+    matches!(git_exit_code(dir, &["cat-file", "-e", &spec]), Ok(0))
+}
+
+/// 解析 `git ls-files -u -- <path>` 的输出：仅当所有冲突条目都是 gitlink
+/// (mode 160000) 且 ours(stage 2)/theirs(stage 3) 两版齐全时，返回
+/// `(ours_sha, theirs_sha)`；混入普通文件（其它 mode）或缺阶段则返回 `None`。
+fn parse_gitlink_stage(output: &str) -> Option<(String, String)> {
+    let mut ours = None;
+    let mut theirs = None;
+    let mut has_entry = false;
+    for line in output.lines() {
+        let (meta, _path) = line.split_once('\t')?;
+        let mut fields = meta.split_whitespace();
+        let mode = fields.next()?;
+        let sha = fields.next()?;
+        let stage = fields.next()?;
+        if mode != "160000" || sha.len() != 40 {
+            return None;
+        }
+        has_entry = true;
+        match stage {
+            "2" => ours = Some(sha.to_string()),
+            "3" => theirs = Some(sha.to_string()),
+            _ => {}
+        }
+    }
+    if !has_entry {
+        return None;
+    }
+    match (ours, theirs) {
+        (Some(o), Some(t)) => Some((o, t)),
+        _ => None,
+    }
+}
+
+/// 在 `.gitmodules` 文本中按子模块 path 取其 url（INI 子集解析，段内键顺序无关）。
+fn parse_submodule_url(text: &str, wanted_path: &str) -> Option<String> {
+    let mut path = None;
+    let mut url = None;
+    let take_if_match = |path: &Option<String>, url: &Option<String>| -> Option<String> {
+        if path.as_deref() == Some(wanted_path) {
+            url.clone()
+        } else {
+            None
+        }
+    };
+    for raw in text.lines() {
+        let line = raw.trim();
+        if line.starts_with('[') {
+            if let Some(found) = take_if_match(&path, &url) {
+                return Some(found);
+            }
+            path = None;
+            url = None;
+        } else if let Some((key, value)) = line.split_once('=') {
+            let value = value.trim().trim_matches('"').trim_matches('\'');
+            match key.trim() {
+                "path" => path = Some(value.to_string()),
+                "url" => url = Some(value.to_string()),
+                _ => {}
+            }
+        }
+    }
+    take_if_match(&path, &url)
 }
 
 #[cfg(windows)]
@@ -494,4 +686,85 @@ pub async fn start_source_update(app: AppHandle) -> Result<String, String> {
 
     SOURCE_UPDATE_RUNNING.store(false, Ordering::Release);
     outcome
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const PANEL_PATH: &str = "src_assets/common/sunshine-control-panel";
+
+    fn gitlink_line(sha_char: char, stage: u8) -> String {
+        format!("160000 {} {stage}\t{PANEL_PATH}", sha_char.to_string().repeat(40))
+    }
+
+    #[test]
+    fn gitlink_stage_returns_ours_and_theirs() {
+        let output = format!(
+            "{}\n{}\n{}\n{}",
+            gitlink_line('1', 1),
+            gitlink_line('2', 2),
+            gitlink_line('3', 3),
+            // 末尾换行不应影响解析
+            "",
+        );
+        let (ours, theirs) = parse_gitlink_stage(&output).expect("三阶段 gitlink 应可解析");
+        assert_eq!(ours, "2".repeat(40));
+        assert_eq!(theirs, "3".repeat(40));
+    }
+
+    #[test]
+    fn gitlink_stage_rejects_plain_file_conflict() {
+        let output = format!(
+            "100644 {} 2\tsrc/stream.cpp\n100644 {} 3\tsrc/stream.cpp",
+            "a".repeat(40),
+            "b".repeat(40),
+        );
+        assert_eq!(parse_gitlink_stage(&output), None);
+    }
+
+    #[test]
+    fn gitlink_stage_rejects_missing_stage_and_empty() {
+        // 只有 ours，缺 theirs
+        assert_eq!(parse_gitlink_stage(&gitlink_line('2', 2)), None);
+        assert_eq!(parse_gitlink_stage(""), None);
+    }
+
+    #[test]
+    fn submodule_url_finds_panel_among_sections() {
+        let text = "\
+[submodule \"third-party/build-deps\"]
+\tpath = third-party/build-deps
+\turl = https://github.com/AlkaidLab/foundation-build-deps.git
+\tbranch = dist
+[submodule \"src_assets/common/sunshine-control-panel\"]
+\tpath = src_assets/common/sunshine-control-panel
+\turl = https://github.com/qiin2333/sunshine-control-panel.git
+\tbranch = main
+";
+        assert_eq!(
+            parse_submodule_url(text, PANEL_PATH),
+            Some("https://github.com/qiin2333/sunshine-control-panel.git".to_string())
+        );
+        // url 写在 path 之前也应命中（段内键顺序无关）
+        let reordered = "\
+[submodule \"x\"]
+\turl = https://example.com/x.git
+\tpath = x
+[submodule \"p\"]
+\turl = https://example.com/p.git
+\tpath = p
+";
+        assert_eq!(
+            parse_submodule_url(reordered, "p"),
+            Some("https://example.com/p.git".to_string())
+        );
+    }
+
+    #[test]
+    fn submodule_url_missing_path_returns_none() {
+        let text = "[submodule \"a\"]\n\tpath = a\n\turl = https://example.com/a.git\n";
+        assert_eq!(parse_submodule_url(text, "b"), None);
+        assert_eq!(parse_submodule_url("", "a"), None);
+    }
 }
