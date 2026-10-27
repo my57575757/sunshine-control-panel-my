@@ -172,7 +172,7 @@
             @click="handleStartSourceUpdate"
           >
             <el-icon><Download /></el-icon>
-            {{ sourceError ? t.updateDialog.sourceRetryBuild : t.updateDialog.sourceSyncBuild }}
+            {{ sourceError ? t.updateDialog.sourceRetryBuild : (buildPending ? t.updateDialog.sourceBuildInstall : t.updateDialog.sourceSyncBuild) }}
           </el-button>
 
           <el-button
@@ -289,10 +289,16 @@ const isLatest = computed(() => !!props.updateInfo?.is_latest)
 
 const isSourceBuild = computed(() => props.updateInfo?.kind === 'source_build')
 
+// 源码已同步但运行中的核心尚未构建安装到该提交：不是“已最新”，需引导本地构建安装。
+const buildPending = computed(() => isSourceBuild.value && !!props.updateInfo?.build_pending)
+
 const dialogTitle = computed(() => {
   const ver = props.updateInfo?.version || ''
   if (isLatest.value) {
     return t.value.updateDialog.titleLatest.replace('{version}', ver)
+  }
+  if (buildPending.value) {
+    return t.value.updateDialog.titleBuildPending.replace('{version}', ver)
   }
   return t.value.updateDialog.titleNew.replace('{version}', ver).replace('{current}', props.currentVersion)
 })

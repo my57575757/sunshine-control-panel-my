@@ -1711,6 +1711,7 @@ export const zh = {
     installing: '正在安装...',
     preparingInstall: '正在准备安装更新，系统将自动关闭服务并启动安装程序',
     titleLatest: '已经是最新版本——此版本更新内容：{version}',
+    titleBuildPending: '源码已是最新，待构建安装（{version}）',
     titleNew: '发现新版本：{version} （当前版本: {current}）',
     noDownloadUrl: '未找到下载链接',
     downloadComplete: '下载完成，准备安装...',
@@ -1751,6 +1752,7 @@ export const zh = {
 
     // 源码模式（fork 同步 + 本地构建）
     sourceSyncBuild: '同步并本地构建',
+    sourceBuildInstall: '立即构建并安装',
     sourceRebuild: '重新同步并本地构建',
     sourceSyncBuilding: '同步与构建进行中…',
     sourceRetryBuild: '失败，重新同步构建',

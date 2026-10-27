@@ -65,6 +65,10 @@ pub struct UpdateInfo {
     /// source_build 模式使用的本地源码目录
     #[serde(default)]
     pub source_dir: Option<String>,
+    /// source_build 模式下源码已与上游同步、但运行中的核心尚未构建安装到该提交。
+    /// `is_latest=false` 且本字段为 true 时，前端引导“立即本地构建并安装”。
+    #[serde(default)]
+    pub build_pending: bool,
 }
 
 /// temp 目录中已下载安装包的缓存标记，用于跳过重复下载并免于被清理。
@@ -237,6 +241,7 @@ fn create_update_info(candidate: &ReleaseCandidate) -> UpdateInfo {
         behind_count: None,
         ahead_count: None,
         source_dir: None,
+        build_pending: false,
     }
 }
 

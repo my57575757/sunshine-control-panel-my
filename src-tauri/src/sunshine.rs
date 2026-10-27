@@ -263,6 +263,60 @@ pub async fn get_sunshine_version() -> Result<String, String> {
     Ok("Unknown".to_string())
 }
 
+/// 从 `sunshine.exe --version` 的输出中提取构建提交短哈希。
+///
+/// 版本串形如 `2026.1020.000723.6beb0709.杂鱼`，第 4 段即构建时的 git 提交；
+/// 本地未提交改动时该段可能带 `-dirty` 后缀。没有提交段（如三段式发布号）返回 `None`。
+pub(crate) fn parse_build_commit(text: &str) -> Option<String> {
+    for token in text.split_whitespace() {
+        let parts: Vec<&str> = token.trim_start_matches('v').split('.').collect();
+        if parts.len() < 4 {
+            continue;
+        }
+        let all_digits = |s: &str| !s.is_empty() && s.chars().all(|c| c.is_ascii_digit());
+        if !(all_digits(parts[0]) && all_digits(parts[1]) && all_digits(parts[2])) {
+            continue;
+        }
+        let candidate = parts[3].split('-').next().unwrap_or(parts[3]);
+        if (7..=40).contains(&candidate.len())
+            && candidate
+                .chars()
+                .all(|c| c.is_ascii_hexdigit())
+        {
+            return Some(candidate.to_string());
+        }
+    }
+    None
+}
+
+/// 取运行中 Sunshine 的构建提交短哈希；版本无法识别时返回 `None`（调用方据此保守处理）。
+#[cfg(windows)]
+pub async fn get_sunshine_build_commit() -> Option<String> {
+    let sunshine_exe = get_sunshine_path().join("sunshine.exe");
+    if !sunshine_exe.exists() {
+        return None;
+    }
+    let output = {
+        use std::os::windows::process::CommandExt;
+        Command::new(sunshine_exe)
+            .arg("--version")
+            .creation_flags(0x0800_0000)
+            .output()
+            .ok()?
+    };
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    parse_build_commit(&combined)
+}
+
+#[cfg(not(windows))]
+pub async fn get_sunshine_build_commit() -> Option<String> {
+    None
+}
+
 fn parse_sunshine_config_content(content: &str) -> SunshineConfig {
     let mut config = SunshineConfig::default();
 
@@ -564,6 +618,22 @@ mod tray_protocol_tests {
             capabilities: vec!["state-v1".to_string(), "actions-v1".to_string()],
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn extracts_build_commit_from_version_line() {
+        assert_eq!(
+            parse_build_commit("Sunshine version: 2026.1020.000723.6beb0709.杂鱼"),
+            Some("6beb0709".to_string())
+        );
+        assert_eq!(
+            parse_build_commit("Sunshine version: 2026.1027.093015.880f1ef-dirty.杂鱼"),
+            Some("880f1ef".to_string())
+        );
+        // 提交段缺失（发布号只有日期三段）或无法识别时不应当作构建提交
+        assert_eq!(parse_build_commit("Sunshine version: 2026.1020.000723.杂鱼"), None);
+        assert_eq!(parse_build_commit("Unknown"), None);
+        assert_eq!(parse_build_commit(""), None);
     }
 
     #[test]

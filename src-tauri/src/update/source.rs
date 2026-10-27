@@ -36,6 +36,8 @@ pub(super) struct SourceStatus {
     behind: u32,
     ahead: u32,
     head_hash: String,
+    /// upstream/master 的完整 SHA，用于判断运行版本是否已包含该提交。
+    upstream_sha: String,
     commits_markdown: String,
 }
 
@@ -232,6 +234,7 @@ fn query_status_blocking(dir: &Path) -> Result<SourceStatus, String> {
     let behind = rev_count(dir, "HEAD..upstream/master")?;
     let ahead = rev_count(dir, "upstream/master..HEAD")?;
     let head_hash = git_trimmed(dir, &["log", "-1", "--pretty=%h", "upstream/master"])?;
+    let upstream_sha = git_trimmed(dir, &["rev-parse", "upstream/master"])?;
     let commits_markdown = git_trimmed(
         dir,
         &["log", "-n", "50", "--pretty=- %h %s", "HEAD..upstream/master"],
@@ -241,8 +244,26 @@ fn query_status_blocking(dir: &Path) -> Result<SourceStatus, String> {
         behind,
         ahead,
         head_hash,
+        upstream_sha,
         commits_markdown,
     })
+}
+
+/// 运行中的核心是否已包含 upstream/master HEAD：在源码仓判断 `upstream_sha`
+/// 是否为运行构建提交的祖先。运行提交缺失、无法识别或在本仓不可达时返回
+/// `false`（保守视为需要重新构建安装）。
+fn installed_contains_upstream(
+    dir: &Path,
+    upstream_sha: &str,
+    running_commit: Option<&str>,
+) -> bool {
+    let Some(running_commit) = running_commit else {
+        return false;
+    };
+    matches!(
+        git_exit_code(dir, &["merge-base", "--is-ancestor", upstream_sha, running_commit]),
+        Ok(0)
+    )
 }
 
 /// 构造源码模式的 `UpdateInfo`；非手动检查且无落后提交时返回 `None`。
@@ -251,7 +272,8 @@ pub(super) async fn check_source_update(
     manual: bool,
 ) -> Result<Option<super::UpdateInfo>, String> {
     let source_dir_string = dir.to_string_lossy().to_string();
-    let status = tauri::async_runtime::spawn_blocking(move || query_status_blocking(&dir))
+    let status_dir = dir.clone();
+    let status = tauri::async_runtime::spawn_blocking(move || query_status_blocking(&status_dir))
         .await
         .map_err(|e| format!("检查任务执行失败: {e}"))??;
 
@@ -259,12 +281,37 @@ pub(super) async fn check_source_update(
         return Ok(None);
     }
 
+    // 源码已同步（behind=0）不等于已安装最新：还要确认运行中的核心已构建到该提交。
+    // 仅源码最新而运行核心仍旧时，标记 build_pending 引导本地构建安装，而非谎报已最新。
+    let mut running_commit: Option<String> = None;
+    let mut is_latest = false;
+    let mut build_pending = false;
+    if status.behind == 0 {
+        running_commit = crate::sunshine::get_sunshine_build_commit().await;
+        let ancestor_dir = dir.clone();
+        let upstream_sha = status.upstream_sha.clone();
+        let rc = running_commit.clone();
+        let up_to_date = tauri::async_runtime::spawn_blocking(move || {
+            installed_contains_upstream(&ancestor_dir, &upstream_sha, rc.as_deref())
+        })
+        .await
+        .unwrap_or(false);
+        is_latest = up_to_date;
+        build_pending = !up_to_date;
+    }
+
     let mut release_notes = String::new();
     if status.behind > 0 {
         release_notes.push_str(&format!("上游 master 有 **{}** 个新提交：\n\n", status.behind));
         release_notes.push_str(&status.commits_markdown);
+    } else if is_latest {
+        release_notes.push_str("本地 my_dev 已与上游 master 同步，运行中的核心已是最新。");
     } else {
-        release_notes.push_str("本地 my_dev 已与上游 master 同步。");
+        let running = running_commit.as_deref().unwrap_or("无法识别的版本");
+        release_notes.push_str(&format!(
+            "本地源码已与上游 master 同步（{}），但运行中的 Sunshine 核心（构建提交 {}）尚未包含该更新。\n\n请点击下方按钮在本地构建并安装，完成后即为最新版本。",
+            status.head_hash, running
+        ));
     }
     if status.ahead > 0 {
         release_notes.push_str(&format!("\n\n本地 my_dev 领先上游 {} 个提交，将通过合并提交保留。", status.ahead));
@@ -281,7 +328,8 @@ pub(super) async fn check_source_update(
         download_type: None,
         release_page: "https://github.com/AlkaidLab/foundation-sunshine/commits/master"
             .to_string(),
-        is_latest: status.behind == 0,
+        is_latest,
+        build_pending,
         kind: "source_build".to_string(),
         behind_count: Some(status.behind),
         ahead_count: Some(status.ahead),
