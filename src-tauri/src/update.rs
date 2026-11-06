@@ -1195,6 +1195,7 @@ fn stage_installer_in_directory(
 /// 之后整条链路与线上下载包完全一致。
 #[cfg(target_os = "windows")]
 fn stage_local_source_installer(source_path: &str) -> Result<(String, u64, String), String> {
+    use sha2::Digest;
     let source = Path::new(source_path);
     validate_download_file_identity(source, None, None, Some("windows-x64-installer"))?;
 
