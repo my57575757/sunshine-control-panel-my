@@ -140,7 +140,7 @@
         <AiAssistant v-if="router.isRoute(ROUTES.AI_ASSISTANT)" @close="goHome" />
         <HdrEnhancedManager v-if="router.isRoute(ROUTES.HDR_ENHANCED)" />
         <ControllersHub
-          v-if="[ROUTES.CONTROLLERS, ROUTES.DUALSENSE, ROUTES.CONTROLLERS_HUB].some(router.isRoute)"
+          v-if="router.isRoute(ROUTES.CONTROLLERS)"
           @close="goHome"
           @open-controller-meta="openGamepadTest"
           @open-stylus-input-probe="openStylusInputProbe"
@@ -212,8 +212,6 @@ const {
   openWebStream,
   openAiAssistant,
   openControllers,
-  openDualSense,
-  openControllersHub,
   openRtxHdr,
   skipVersion,
   includePrerelease,
@@ -285,8 +283,6 @@ defineExpose({
   openWebStream,
   openAiAssistant,
   openControllers,
-  openDualSense,
-  openControllersHub,
   openRtxHdr,
   goHome,
   checkForUpdates: handleCheckForUpdates,
